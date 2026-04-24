@@ -21,12 +21,12 @@ def home():
     return "Bot is Online and Awake!"
 
 def run():
-    # Render assegna la porta automaticamente tramite variabile d'ambiente
+    # Render assegna la porta automaticamente
     port = int(os.environ.get("PORT", 8080))
     app_web.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    """Avvia un thread separato per il server web."""
+    """Avvia il server web per evitare lo sleep di Render."""
     t = Thread(target=run)
     t.daemon = True
     t.start()
@@ -38,7 +38,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Carica variabili da .env (solo per test locale)
 load_dotenv()
 
 # SOSTITUISCI CON IL TUO ID (chiedilo a @userinfobot)
@@ -46,7 +45,8 @@ AUTHORIZED_USERS = [123456789]
 
 async def is_authorized(update: Update):
     if update.effective_user.id not in AUTHORIZED_USERS:
-        await update.message.reply_text("⛔ Accesso negato.")
+        # Silenzioso per chi non è autorizzato, o messaggio di avviso
+        await update.message.reply_text("⛔ Non sei autorizzato.")
         return False
     return True
 
@@ -59,49 +59,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     markup = ReplyKeyboardMarkup(tastiera, resize_keyboard=True)
     
     await update.message.reply_text(
-        f"Ciao {update.effective_user.first_name}!\nIl bot è attivo sul Cloud e indipendente dal tuo PC.",
+        f"Ciao {update.effective_user.first_name}!\nBot ora 100% indipendente.",
         reply_markup=markup
     )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
-    await update.message.reply_text("📸 Foto ricevuta correttamente!")
+    await update.message.reply_text("📸 Immagine ricevuta correttamente!")
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_authorized(update): return
     
     testo = update.message.text
     if testo == '🚀 Stato':
-        await update.message.reply_text("✅ Tutto ok! Server attivo su Render.")
+        await update.message.reply_text("✅ Server attivo su Render. Pronto all'uso.")
     else:
         await update.message.reply_text(f"Hai scritto: {testo}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Errore critico: {context.error}")
+    # Se l'errore è un conflitto (409), è utile vederlo nei log
+    logger.error(f"Errore: {context.error}")
 
 # --- 4. AVVIO ---
 
 if __name__ == "__main__":
-    # Su Render il token viene letto dalle Environment Variables
     token = os.getenv("TELEGRAM_TOKEN")
     
     if not token:
-        logger.error("❌ ERRORE: Variabile TELEGRAM_TOKEN non trovata!")
+        logger.error("❌ TELEGRAM_TOKEN mancante nelle variabili d'ambiente!")
     else:
-        # Avviamo il server web per evitare lo sleep di Render
+        # Avviamo il battito cardiaco web
         keep_alive()
         
-        # Gestione dati persistenti
+        # Persistenza dati (salva su file per non perdere info al riavvio)
         persistence = PicklePersistence(filepath="bot_data.pickle")
         
-        # Creazione App
+        # Creazione dell'App
         app = ApplicationBuilder().token(token).persistence(persistence).build()
         
-        # Aggiunta Handler
+        # Handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo))
         app.add_error_handler(error_handler)
         
-        print("🚀 BOT IN ASCOLTO... Pronto per il Cloud.")
+        print("🚀 BOT IN ASCOLTO SUL CLOUD...")
         app.run_polling()
