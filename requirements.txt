@@ -3,3 +3,4 @@ python-dotenv
 flask
 google-generativeai
 openai
+httpx
