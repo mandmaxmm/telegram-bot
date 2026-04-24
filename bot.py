@@ -1,8 +1,6 @@
 import os
 import logging
 import asyncio
-import google.generativeai as genai
-from openai import OpenAI
 from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
@@ -12,12 +10,14 @@ from telegram.ext import (
     filters, ContextTypes, PicklePersistence
 )
 
-# --- 1. CONFIGURAZIONE WEB SERVER (Keep-Alive per Render) ---
-app_web = Flask('')
+# Librerie AI
+import google.generativeai as genai
+from openai import OpenAI
 
+# --- 1. CONFIGURAZIONE WEB SERVER (Keep-Alive) ---
+app_web = Flask('')
 @app_web.route('/')
-def home():
-    return "Ensemble Bot is Online and Thinking!"
+def home(): return "Ensemble Multimodale Online!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -28,119 +28,132 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# --- 2. LOGGING E SICUREZZA ---
+# --- 2. SETUP LOGGING E SICUREZZA ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 load_dotenv()
 
-# INSERISCI IL TUO ID (visto nello screenshot)
-AUTHORIZED_USERS = [1379829807] 
+AUTHORIZED_USERS = [1379829807] # Sostituisci col tuo ID
 
-# Configurazione AI Modelli
+# --- 3. CONFIGURAZIONE PROVIDER AI ---
+
+# Gemini (Google)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_model = genai.GenerativeModel('gemini-pro')
 
-# Client OpenAI (opzionale, si attiva se aggiungi la chiave su Render)
-client_openai = None
-if os.getenv("OPENAI_API_KEY"):
-    client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Groq (Llama/Mistral alta velocità)
+groq_client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY")
+) if os.getenv("GROQ_API_KEY") else None
 
-async def is_authorized(update: Update):
-    if update.effective_user.id not in AUTHORIZED_USERS:
-        return False
-    return True
+# OpenRouter (Per DeepSeek, Mistral, Claude)
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY")
+) if os.getenv("OPENROUTER_API_KEY") else None
 
-# --- 3. LOGICA MULTI-MODELLO (ENSEMBLE & SINTESI) ---
+# --- 4. LOGICA ENSEMBLE (MULTI-THREADING) ---
 
-async def get_gemini_response(prompt):
+async def call_gemini(prompt):
     try:
         response = gemini_model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Errore Gemini: {e}"
+        return f"--- EXPERT GEMINI ---\n{response.text}"
+    except Exception as e: return f"Gemini Error: {e}"
 
-async def get_openai_response(prompt):
-    if not client_openai: return None
+async def call_groq(prompt):
+    if not groq_client: return "Groq non configurato."
     try:
-        response = client_openai.chat.completions.create(
-            model="gpt-3.5-turbo",
+        response = groq_client.chat.completions.create(
+            model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Errore OpenAI: {e}"
+        return f"--- EXPERT GROQ (LLAMA3) ---\n{response.choices[0].message.content}"
+    except Exception as e: return f"Groq Error: {e}"
 
-async def ensemble_synthesis(user_prompt):
-    """Interroga i modelli e sintetizza una risposta unica."""
-    # Fase 1: Raccolta pareri dagli Esperti
-    risposta_gemini = await get_gemini_response(user_prompt)
-    risposta_openai = await get_openai_response(user_prompt)
+async def call_openrouter(prompt):
+    if not openrouter_client: return "OpenRouter non configurato."
+    try:
+        # Qui usiamo DeepSeek tramite OpenRouter
+        response = openrouter_client.chat.completions.create(
+            model="deepseek/deepseek-chat",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return f"--- EXPERT DEEPSEEK ---\n{response.choices[0].message.content}"
+    except Exception as e: return f"OpenRouter Error: {e}"
 
-    if not risposta_openai:
-        return risposta_gemini # Se c'è solo Gemini, restituiamo quello
-
-    # Fase 2: Sintesi finale (Chiediamo a Gemini di unire le informazioni)
+async def synthesize_responses(user_prompt, results):
+    """Prende tutti i pareri e crea la sintesi finale usando Gemini."""
+    context = "\n\n".join(results)
     prompt_sintesi = f"""
-    Agisci come un sintetizzatore esperto. Hai ricevuto due risposte a questa domanda: "{user_prompt}"
-    Risposta 1: {risposta_gemini}
-    Risposta 2: {risposta_openai}
-    Crea una risposta finale completa, eliminando le ripetizioni e mantenendo i punti di forza di entrambe.
+    Sei il 'Sintetizzatore Ensemble'. Hai ricevuto diverse analisi per la domanda: "{user_prompt}"
+    
+    Analisi ricevute:
+    {context}
+    
+    Compito: Crea una risposta magistrale che integri i punti chiave di tutti gli esperti. 
+    Sii tecnico ma chiaro, elimina le ripetizioni e correggi eventuali incongruenze tra i modelli.
     """
-    sintesi_finale = await get_gemini_response(prompt_sintesi)
-    return sintesi_finale
+    try:
+        sintesi = gemini_model.generate_content(prompt_sintesi)
+        return sintesi.text
+    except:
+        return "Errore nella fase di sintesi. Ecco i pareri grezzi:\n\n" + context
 
-# --- 4. HANDLERS ---
+# --- 5. HANDLERS TELEGRAM ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_authorized(update): return
-    tastiera = [['🚀 Stato Sistema', '🧠 Modalità Ensemble'], ['📸 Invia Foto']]
+    if update.effective_user.id not in AUTHORIZED_USERS: return
+    tastiera = [['🚀 Stato Sistema', '🧠 Reset Memoria']]
     markup = ReplyKeyboardMarkup(tastiera, resize_keyboard=True)
     await update.message.reply_text(
-        "Sincronizzazione completata. Sistema Ensemble Multi-Modello attivo.\nCosa vuoi analizzare oggi?",
+        "🛠️ Ensemble Engine Attivo.\nGemini, Groq e DeepSeek sono pronti.\nCosa analizziamo?",
         reply_markup=markup
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_authorized(update): return
+async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in AUTHORIZED_USERS: return
     
-    user_text = update.message.text
-    
-    if user_text == '🚀 Stato Sistema':
-        status = "✅ Cloud: Online\n✅ Gemini: Attivo"
-        status += "\n✅ OpenAI: Collegato" if client_openai else "\n⚠️ OpenAI: Non configurato"
-        await update.message.reply_text(status)
+    user_prompt = update.message.text
+    if user_prompt == '🚀 Stato Sistema':
+        msg = "📡 Connessioni:\n"
+        msg += "✅ Gemini: OK\n"
+        msg += "✅ Groq: " + ("OK" if groq_client else "OFF") + "\n"
+        msg += "✅ OpenRouter: " + ("OK" if openrouter_client else "OFF")
+        await update.message.reply_text(msg)
         return
 
-    msg_attesa = await update.message.reply_text("💎 Interrogo gli esperti e sintetizzo la risposta...")
+    waiting_msg = await update.message.reply_text("🧬 Ensemble sta interrogando gli esperti...")
 
-    # Esecuzione Sintesi Ensemble
-    risposta_finale = await ensemble_synthesis(user_text)
+    # Lancio parallelo di tutti i modelli per risparmiare tempo
+    tasks = [
+        call_gemini(user_prompt),
+        call_groq(user_prompt),
+        call_openrouter(user_prompt)
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    
+    # Generazione sintesi
+    final_response = await synthesize_responses(user_prompt, results)
 
     await context.bot.edit_message_text(
         chat_id=update.effective_chat.id,
-        message_id=msg_attesa.message_id,
-        text=risposta_finale
+        message_id=waiting_msg.message_id,
+        text=final_response
     )
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Errore: {context.error}")
-
-# --- 5. ESECUZIONE ---
+# --- 6. AVVIO ---
 
 if __name__ == "__main__":
     token = os.getenv("TELEGRAM_TOKEN")
-    
     if not token:
-        logger.error("Token mancante!")
+        logger.error("Manca il token Telegram!")
     else:
         keep_alive()
         persistence = PicklePersistence(filepath="bot_data.pickle")
         app = ApplicationBuilder().token(token).persistence(persistence).build()
-        
         app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-        app.add_error_handler(error_handler)
-        
-        print("🚀 ENSEMBLE CLOUD ONLINE...")
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
+        print("🚀 ENSEMBLE MULTI-MODEL CLOUD ONLINE...")
         app.run_polling()
