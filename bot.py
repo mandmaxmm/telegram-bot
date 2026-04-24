@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # SOSTITUISCI CON IL TUO ID (chiedilo a @userinfobot)
-AUTHORIZED_USERS = [123456789] 
+AUTHORIZED_USERS = [1379829807] 
 
 async def is_authorized(update: Update):
     if update.effective_user.id not in AUTHORIZED_USERS:
