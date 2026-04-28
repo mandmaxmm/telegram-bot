@@ -14,36 +14,32 @@ import google.generativeai as genai
 from openai import OpenAI
 from mistralai import Mistral
 
-# --- 1. CONFIGURAZIONE WEB SERVER ---
+# --- 1. WEB SERVER ---
 app_web = Flask('')
 @app_web.route('/')
-def home(): return "Ensemble Engine V3: Online & Updated"
+def home(): return "Ensemble Engine V3.1: Active & Updated"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
     app_web.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
+    t = Thread(target=run); t.daemon = True; t.start()
 
 # --- 2. SETUP ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-AUTHORIZED_USERS = [1379829807] # Inserisci il tuo ID reale
+AUTHORIZED_USERS = [1379829807] # METTI IL TUO ID REALE QUI
 
-# --- 3. INIZIALIZZAZIONE MODELLI (VERSIONI 2026) ---
+# --- 3. CONFIGURAZIONE MODELLI AGGIORNATI ---
 def get_ai_clients():
     if os.getenv("GEMINI_API_KEY"):
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
     
     clients = {
-        # Aggiornato a Gemini 1.5 Flash (più stabile e veloce)
         "gemini": genai.GenerativeModel('gemini-1.5-flash') if os.getenv("GEMINI_API_KEY") else None,
-        # Aggiornato a Llama 3.3 Versatile su Groq
         "groq": OpenAI(base_url="https://api.groq.com/openai/v1", api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None,
         "mistral": Mistral(api_key=os.getenv("MISTRAL_API_KEY")) if os.getenv("MISTRAL_API_KEY") else None,
         "deepseek": OpenAI(base_url="https://api.deepseek.com", api_key=os.getenv("DEEPSEEK_API_KEY")) if os.getenv("DEEPSEEK_API_KEY") else None,
@@ -53,77 +49,67 @@ def get_ai_clients():
 
 AI = get_ai_clients()
 
-# --- 4. FUNZIONI CHIAMATA ---
-
+# --- 4. LOGICA DI CHIAMATA ---
 async def call_model(name, func, prompt):
     try:
-        return await func(prompt)
+        res = await func(prompt)
+        return f"--- EXPERT {name.upper()} ---\n{res}"
     except Exception as e:
         logger.error(f"Errore su {name}: {e}")
-        return f"{name} Error: {e}"
+        return None # Restituiamo None per filtrare i modelli offline
 
 async def fetch_responses(prompt):
     tasks = []
-    if AI["gemini"]:
-        tasks.append(call_model("Gemini", lambda p: AI["gemini"].generate_content(p).text, prompt))
-    if AI["groq"]:
-        # Modello aggiornato qui
-        tasks.append(call_model("Groq", lambda p: AI["groq"].chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["mistral"]:
-        tasks.append(call_model("Mistral", lambda p: AI["mistral"].chat.complete(model="mistral-large-latest", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["deepseek"]:
-        tasks.append(call_model("DeepSeek", lambda p: AI["deepseek"].chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["grok"]:
-        tasks.append(call_model("Grok", lambda p: AI["grok"].chat.completions.create(model="grok-beta", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
+    if AI["gemini"]: tasks.append(call_model("Gemini", lambda p: AI["gemini"].generate_content(p).text, prompt))
+    if AI["groq"]: tasks.append(call_model("Groq", lambda p: AI["groq"].chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
+    if AI["mistral"]: tasks.append(call_model("Mistral", lambda p: AI["mistral"].chat.complete(model="mistral-large-latest", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
+    if AI["deepseek"]: tasks.append(call_model("DeepSeek", lambda p: AI["deepseek"].chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
+    if AI["grok"]: tasks.append(call_model("Grok", lambda p: AI["grok"].chat.completions.create(model="grok-beta", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
 
-    return await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
+    return [r for r in results if r is not None]
 
-# --- 5. SINTESI CON FALLBACK ---
-
+# --- 5. SINTESI ROBUSTA ---
 async def synthesize(user_prompt, responses):
-    # Filtriamo solo le risposte che non sono errori
-    valid_responses = [r for r in responses if "Error:" not in r]
+    if not responses: return "⚠️ Nessun modello disponibile al momento."
     
-    if not valid_responses:
-        return "Nessun modello è riuscito a rispondere. Controlla i log e le API Key."
+    context = "\n\n".join(responses)
+    prompt_sintesi = f"Sintetizza in un'unica risposta magistrale e fluida per l'utente (domanda: {user_prompt}):\n\n{context}"
     
-    context = "\n\n".join(valid_responses)
-    prompt_sintesi = f"Sintetizza in una risposta fluida e completa per l'utente: {user_prompt}\n\nAnalisi esperti:\n{context}"
-    
-    # Proviamo Gemini, se fallisce proviamo DeepSeek come sintetizzatore di riserva
+    # Primo tentativo: Gemini
     try:
         res = AI["gemini"].generate_content(prompt_sintesi)
         return res.text
     except:
+        # Fallback: DeepSeek come sintetizzatore di riserva
         try:
             res = AI["deepseek"].chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": prompt_sintesi}])
-            return res.choices[0].message.content + "\n\n*(Sintesi eseguita da DeepSeek)*"
+            return res.choices[0].message.content
         except:
-            return "Errore sintesi. Ecco i pareri disponibili:\n\n" + context
+            return "Sintesi fallita. Ecco i pareri grezzi:\n\n" + context
 
 # --- 6. HANDLERS ---
-
 async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in AUTHORIZED_USERS: return
     
     user_text = update.message.text
     if user_text == '🚀 Stato Sistema':
         active = [k for k, v in AI.items() if v is not None]
-        await update.message.reply_text(f"🛰️ Ensemble V3 Online\n🧠 Provider: {', '.join(active)}")
+        await update.message.reply_text(f"🛰️ Ensemble V3.1 Online\n🧠 Provider pronti: {', '.join(active)}")
         return
 
-    waiting = await update.message.reply_text("🧬 Ensemble sta interrogando la squadra aggiornata...")
+    waiting = await update.message.reply_text("🧬 Ensemble sta interrogando la squadra...")
     raw_results = await fetch_responses(user_text)
     final_answer = await synthesize(user_text, raw_results)
     
     await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=waiting.message_id, text=final_answer)
 
-# --- 7. AVVIO ---
+# --- 7. START ---
 if __name__ == "__main__":
     token = os.getenv("TELEGRAM_TOKEN")
     if token:
         keep_alive()
         app = ApplicationBuilder().token(token).persistence(PicklePersistence(filepath="ensemble_v3.pickle")).build()
-        app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Ensemble V3 Pronto.", reply_markup=ReplyKeyboardMarkup([['🚀 Stato Sistema']], resize_keyboard=True))))
+        app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Ensemble Engine Aggiornato.", reply_markup=ReplyKeyboardMarkup([['🚀 Stato Sistema']], resize_keyboard=True))))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
         app.run_polling()
