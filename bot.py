@@ -34,7 +34,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # --- SEZIONE 2: MOTORE DI INTELLIGENZA (API Calls) ---
-
 class EnsembleEngine:
     def __init__(self):
         self.timeout = httpx.Timeout(25.0, connect=5.0)
@@ -48,6 +47,8 @@ class EnsembleEngine:
 
     async def call_openai_compatible(self, client: httpx.AsyncClient, url: str, key: str, model: str, prompt: str) -> str:
         """Helper per modelli con standard OpenAI (Groq, DeepSeek, Mistral, xAI)"""
+        if not key:
+            return ""
         try:
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
             payload = {
@@ -63,7 +64,9 @@ class EnsembleEngine:
             return ""
 
     async def call_gemini(self, client: httpx.AsyncClient, prompt: str) -> str:
-        """Chiamata specifica per Google Gemini"""
+        """Chiamata specifica per Google Gemini tramite API REST"""
+        if not self.headers['gemini']:
+            return ""
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.headers['gemini']}"
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -113,7 +116,6 @@ class EnsembleEngine:
             return final_output or "Errore critico nella fase di sintesi."
 
 # --- SEZIONE 3: LOGICA TELEGRAM HANDLER ---
-
 engine = EnsembleEngine()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,7 +133,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Errore di sistema: {str(e)}")
 
 # --- SEZIONE 4: AVVIO E PROTOCOLLI DI STABILITÀ ---
-
 def main():
     # Avvio micro-server Flask in un thread dedicato
     threading.Thread(target=run_flask, daemon=True).start()
@@ -140,7 +141,7 @@ def main():
     # Inizializzazione Bot Telegram
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        logger.error("TELEGRAM_BOT_TOKEN mancante!")
+        logger.error("TELEGRAM_BOT_TOKEN mancante! Assicurati di averlo impostato nelle variabili d'ambiente di Render.")
         return
 
     application = Application.builder().token(token).build()
