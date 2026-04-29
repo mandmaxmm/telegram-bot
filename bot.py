@@ -1,115 +1,157 @@
 import os
-import logging
 import asyncio
+import logging
+import threading
+from typing import List, Dict, Any
+
+# Librerie Core
 from flask import Flask
-from threading import Thread
+import httpx
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, 
-    filters, ContextTypes, PicklePersistence
-)
-import google.generativeai as genai
-from openai import OpenAI
-from mistralai import Mistral
-
-# --- 1. WEB SERVER ---
-app_web = Flask('')
-@app_web.route('/')
-def home(): return "Ensemble Engine V3.1: Active & Updated"
-
-def run():
-    port = int(os.environ.get("PORT", 8080))
-    app_web.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run); t.daemon = True; t.start()
-
-# --- 2. SETUP ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Caricamento variabili d'ambiente
 load_dotenv()
 
-AUTHORIZED_USERS = [1379829807] # METTI IL TUO ID REALE QUI
+# Configurazione Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# --- 3. CONFIGURAZIONE MODELLI AGGIORNATI ---
-def get_ai_clients():
-    if os.getenv("GEMINI_API_KEY"):
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    
-    clients = {
-        "gemini": genai.GenerativeModel('gemini-1.5-flash') if os.getenv("GEMINI_API_KEY") else None,
-        "groq": OpenAI(base_url="https://api.groq.com/openai/v1", api_key=os.getenv("GROQ_API_KEY")) if os.getenv("GROQ_API_KEY") else None,
-        "mistral": Mistral(api_key=os.getenv("MISTRAL_API_KEY")) if os.getenv("MISTRAL_API_KEY") else None,
-        "deepseek": OpenAI(base_url="https://api.deepseek.com", api_key=os.getenv("DEEPSEEK_API_KEY")) if os.getenv("DEEPSEEK_API_KEY") else None,
-        "grok": OpenAI(base_url="https://api.x.ai/v1", api_key=os.getenv("GROK_API_KEY")) if os.getenv("GROK_API_KEY") else None
-    }
-    return clients
+# --- SEZIONE 1: SERVER FLASK (Fix per Render Port Scan) ---
+app = Flask(__name__)
 
-AI = get_ai_clients()
+@app.route('/')
+def health_check():
+    return "Ensemble Engine V4.0 Active", 200
 
-# --- 4. LOGICA DI CHIAMATA ---
-async def call_model(name, func, prompt):
-    try:
-        res = await func(prompt)
-        return f"--- EXPERT {name.upper()} ---\n{res}"
-    except Exception as e:
-        logger.error(f"Errore su {name}: {e}")
-        return None # Restituiamo None per filtrare i modelli offline
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    # Flask gira su thread separato per non bloccare il loop asincrono del bot
+    app.run(host='0.0.0.0', port=port)
 
-async def fetch_responses(prompt):
-    tasks = []
-    if AI["gemini"]: tasks.append(call_model("Gemini", lambda p: AI["gemini"].generate_content(p).text, prompt))
-    if AI["groq"]: tasks.append(call_model("Groq", lambda p: AI["groq"].chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["mistral"]: tasks.append(call_model("Mistral", lambda p: AI["mistral"].chat.complete(model="mistral-large-latest", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["deepseek"]: tasks.append(call_model("DeepSeek", lambda p: AI["deepseek"].chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
-    if AI["grok"]: tasks.append(call_model("Grok", lambda p: AI["grok"].chat.completions.create(model="grok-beta", messages=[{"role": "user", "content": p}]).choices[0].message.content, prompt))
+# --- SEZIONE 2: MOTORE DI INTELLIGENZA (API Calls) ---
 
-    results = await asyncio.gather(*tasks)
-    return [r for r in results if r is not None]
+class EnsembleEngine:
+    def __init__(self):
+        self.timeout = httpx.Timeout(25.0, connect=5.0)
+        self.headers = {
+            "gemini": os.getenv("GEMINI_API_KEY"),
+            "groq": os.getenv("GROQ_API_KEY"),
+            "deepseek": os.getenv("DEEPSEEK_API_KEY"),
+            "mistral": os.getenv("MISTRAL_API_KEY"),
+            "grok": os.getenv("GROK_API_KEY")
+        }
 
-# --- 5. SINTESI ROBUSTA ---
-async def synthesize(user_prompt, responses):
-    if not responses: return "⚠️ Nessun modello disponibile al momento."
-    
-    context = "\n\n".join(responses)
-    prompt_sintesi = f"Sintetizza in un'unica risposta magistrale e fluida per l'utente (domanda: {user_prompt}):\n\n{context}"
-    
-    # Primo tentativo: Gemini
-    try:
-        res = AI["gemini"].generate_content(prompt_sintesi)
-        return res.text
-    except:
-        # Fallback: DeepSeek come sintetizzatore di riserva
+    async def call_openai_compatible(self, client: httpx.AsyncClient, url: str, key: str, model: str, prompt: str) -> str:
+        """Helper per modelli con standard OpenAI (Groq, DeepSeek, Mistral, xAI)"""
         try:
-            res = AI["deepseek"].chat.completions.create(model="deepseek-chat", messages=[{"role": "user", "content": prompt_sintesi}])
-            return res.choices[0].message.content
-        except:
-            return "Sintesi fallita. Ecco i pareri grezzi:\n\n" + context
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7
+            }
+            response = await client.post(url, json=payload, headers=headers, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()['choices'][0]['message']['content']
+        except Exception as e:
+            logger.error(f"Errore su {model}: {str(e)}")
+            return ""
 
-# --- 6. HANDLERS ---
-async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in AUTHORIZED_USERS: return
-    
+    async def call_gemini(self, client: httpx.AsyncClient, prompt: str) -> str:
+        """Chiamata specifica per Google Gemini"""
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.headers['gemini']}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            response = await client.post(url, json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            logger.error(f"Errore su Gemini: {str(e)}")
+            return ""
+
+    async def get_ensemble_response(self, user_query: str) -> str:
+        """Orchestrazione Parallela degli Esperti e Sintesi"""
+        async with httpx.AsyncClient() as client:
+            # 1. Interrogazione Parallela del Pool Esperti
+            tasks = [
+                self.call_openai_compatible(client, "https://api.groq.com/openai/v1/chat/completions", self.headers['groq'], "llama-3.3-70b-versatile", user_query),
+                self.call_openai_compatible(client, "https://api.deepseek.com/chat/completions", self.headers['deepseek'], "deepseek-chat", user_query),
+                self.call_openai_compatible(client, "https://api.mistral.ai/v1/chat/completions", self.headers['mistral'], "mistral-large-latest", user_query),
+                self.call_openai_compatible(client, "https://api.x.ai/v1/chat/completions", self.headers['grok'], "grok-beta", user_query)
+            ]
+            
+            responses = await asyncio.gather(*tasks)
+            # Filtro risposte vuote (Fault Tolerance)
+            valid_responses = [r for r in responses if r]
+            
+            if not valid_responses:
+                return "Mi dispiace, ma tutti i modelli esperti sono attualmente non raggiungibili."
+
+            # 2. Fase di Sintesi (Modello Maestro)
+            context_for_master = "\n\n".join([f"Esperto {i+1}: {resp}" for i, resp in enumerate(valid_responses)])
+            synthesis_prompt = (
+                f"Agisci come Modello Maestro. Analizza le seguenti risposte fornite da esperti diversi alla domanda dell'utente: '{user_query}'\n\n"
+                f"{context_for_master}\n\n"
+                "Genera una risposta finale autoritaria, coerente e strutturata che sintetizzi il meglio di ogni contributo."
+            )
+
+            final_output = await self.call_gemini(client, synthesis_prompt)
+
+            # 3. Fallback di Sintesi (Se Gemini fallisce)
+            if not final_output:
+                logger.warning("Gemini fallito, attivo Fallback su DeepSeek")
+                final_output = await self.call_openai_compatible(
+                    client, "https://api.deepseek.com/chat/completions", 
+                    self.headers['deepseek'], "deepseek-chat", synthesis_prompt
+                )
+
+            return final_output or "Errore critico nella fase di sintesi."
+
+# --- SEZIONE 3: LOGICA TELEGRAM HANDLER ---
+
+engine = EnsembleEngine()
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 Ensemble Engine V4.0 Online. Invia una domanda per interrogare il pool di esperti.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    if user_text == '🚀 Stato Sistema':
-        active = [k for k, v in AI.items() if v is not None]
-        await update.message.reply_text(f"🛰️ Ensemble V3.1 Online\n🧠 Provider pronti: {', '.join(active)}")
+    # Feedback visivo immediato
+    status_msg = await update.message.reply_text("🤖 Interrogando il pool di esperti...")
+    
+    try:
+        response = await engine.get_ensemble_response(user_text)
+        await status_msg.edit_text(response, parse_mode='Markdown')
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Errore di sistema: {str(e)}")
+
+# --- SEZIONE 4: AVVIO E PROTOCOLLI DI STABILITÀ ---
+
+def main():
+    # Avvio micro-server Flask in un thread dedicato
+    threading.Thread(target=run_flask, daemon=True).start()
+    logger.info("Server Flask di monitoraggio avviato.")
+
+    # Inizializzazione Bot Telegram
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN mancante!")
         return
 
-    waiting = await update.message.reply_text("🧬 Ensemble sta interrogando la squadra...")
-    raw_results = await fetch_responses(user_text)
-    final_answer = await synthesize(user_text, raw_results)
-    
-    await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=waiting.message_id, text=final_answer)
+    application = Application.builder().token(token).build()
 
-# --- 7. START ---
+    # Handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Avvio polling con gestione pulita
+    logger.info("Avvio polling Telegram...")
+    application.run_polling(drop_pending_updates=True)
+
 if __name__ == "__main__":
-    token = os.getenv("TELEGRAM_TOKEN")
-    if token:
-        keep_alive()
-        app = ApplicationBuilder().token(token).persistence(PicklePersistence(filepath="ensemble_v3.pickle")).build()
-        app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Ensemble Engine Aggiornato.", reply_markup=ReplyKeyboardMarkup([['🚀 Stato Sistema']], resize_keyboard=True))))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), main_handler))
-        app.run_polling()
+    main()
