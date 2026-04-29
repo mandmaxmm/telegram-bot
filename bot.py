@@ -42,7 +42,8 @@ class EnsembleEngine:
             "groq": os.getenv("GROQ_API_KEY"),
             "deepseek": os.getenv("DEEPSEEK_API_KEY"),
             "mistral": os.getenv("MISTRAL_API_KEY"),
-            "grok": os.getenv("GROK_API_KEY")
+            # Aggiornato per leggere XAI_API_KEY da Render
+            "grok": os.getenv("XAI_API_KEY") 
         }
 
     async def call_openai_compatible(self, client: httpx.AsyncClient, url: str, key: str, model: str, prompt: str) -> str:
@@ -138,10 +139,10 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
     logger.info("Server Flask di monitoraggio avviato.")
 
-    # Inizializzazione Bot Telegram
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    # Aggiornato per leggere TELEGRAM_TOKEN da Render
+    token = os.getenv("TELEGRAM_TOKEN")
     if not token:
-        logger.error("TELEGRAM_BOT_TOKEN mancante! Assicurati di averlo impostato nelle variabili d'ambiente di Render.")
+        logger.error("TELEGRAM_TOKEN mancante! Assicurati di averlo impostato nelle variabili d'ambiente di Render.")
         return
 
     application = Application.builder().token(token).build()
