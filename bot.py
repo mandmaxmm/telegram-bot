@@ -468,6 +468,12 @@ def _split_message(text: str, max_len: int = 4000) -> list[str]:
 # ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # FIX Python 3.14 — get_event_loop() non crea più il loop implicitamente.
+    # Creiamo e impostiamo esplicitamente un nuovo event loop sul MainThread
+    # prima che PTB (o qualsiasi altra lib) provi a recuperarlo.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     # 1. Avvia il micro-server Flask su thread daemon
     start_flask_thread()
 
@@ -490,11 +496,11 @@ def main() -> None:
     )
 
     # 4. Avvia il polling con protezione anti-conflitto
+    # Nota: close_loop rimosso — PTB 21.x gestisce il loop internamente.
     logger.info("Avvio del polling Telegram (Ensemble V4.0)…")
     application.run_polling(
         drop_pending_updates=True,   # ← risolve conflitti al riavvio
         allowed_updates=Update.ALL_TYPES,
-        close_loop=False,            # lascia gestire il loop a PTB
     )
 
 
