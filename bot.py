@@ -1,4 +1,4 @@
-import os, asyncio, logging, threading, sys
+import os, asyncio, logging, threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -6,19 +6,24 @@ import httpx
 from dotenv import load_dotenv
 
 # 1. CONFIGURAZIONE LOGGING
+# Impostiamo il log per vedere chiaramente cosa succede nei server di Render
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 2. SERVER FLASK PER RENDER (Health Check)
+# 2. SERVER FLASK (Necessario per Render)
+# Questo pezzo di codice dice a Render: "Ehi, sono vivo e sto ascoltando sulla porta 10000"
 app = Flask(__name__)
+
 @app.route('/')
-def health(): return "Bot Operativo", 200
+def health_check():
+    return "Bot is running!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
+    # Usiamo il server integrato di Flask in modalità thread-safe
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# 3. GESTORE INTELLIGENZA ARTIFICIALE
+# 3. MOTORE DI INTELLIGENZA ARTIFICIALE (Multi-Modello)
 class AIHandler:
     def __init__(self):
         load_dotenv()
@@ -27,20 +32,32 @@ class AIHandler:
         self.mistral_key = os.getenv("MISTRAL_API_KEY")
 
     async def call_gemini(self, client, prompt):
+        """Tenta di chiamare Gemini usando la versione stabile o la beta come backup."""
         if not self.gemini_key: return None
-        # URL specifico per Google AI Studio (v1beta è il più stabile per Flash)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key.strip()}"
+        
+        # Primo tentativo: Versione v1 (Stabile)
+        url_v1 = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={self.gemini_key.strip()}"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        
         try:
-            r = await client.post(url, json=payload, timeout=20)
+            r = await client.post(url_v1, json=payload, timeout=20)
             if r.status_code == 200:
                 return r.json()['candidates'][0]['content']['parts'][0]['text']
-            logger.error(f"Gemini fallito ({r.status_code}): {r.text}")
+            
+            # Secondo tentativo se il primo dà 404: v1beta con suffisso -latest
+            if r.status_code == 404:
+                url_beta = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={self.gemini_key.strip()}"
+                r = await client.post(url_beta, json=payload, timeout=20)
+                if r.status_code == 200:
+                    return r.json()['candidates'][0]['content']['parts'][0]['text']
+            
+            logger.error(f"Gemini Error {r.status_code}: {r.text}")
         except Exception as e:
-            logger.error(f"Errore Gemini: {e}")
+            logger.error(f"Eccezione Gemini: {e}")
         return None
 
     async def call_openai_style(self, client, url, key, model, prompt):
+        """Gestisce le API di Groq e Mistral (formato standard OpenAI)."""
         if not key: return None
         headers = {"Authorization": f"Bearer {key.strip()}", "Content-Type": "application/json"}
         payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
@@ -48,65 +65,75 @@ class AIHandler:
             r = await client.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code == 200:
                 return r.json()['choices'][0]['message']['content']
-        except: pass
+        except Exception as e:
+            logger.error(f"Errore su {model}: {e}")
         return None
 
     async def get_response(self, query):
+        """Prova i modelli in ordine di priorità: Gemini -> Groq -> Mistral."""
         async with httpx.AsyncClient() as client:
-            # 1. Tentativo primario: Gemini
+            # 1. Priorità: Gemini
             answer = await self.call_gemini(client, query)
             if answer: return answer
             
-            # 2. Backup: Groq (Llama 3.3)
+            # 2. Backup 1: Groq (Llama 3.3 è velocissimo)
             answer = await self.call_openai_style(client, "https://api.groq.com/openai/v1/chat/completions", self.groq_key, "llama-3.3-70b-versatile", query)
             if answer: return answer
             
-            # 3. Ultima spiaggia: Mistral
+            # 3. Backup 2: Mistral
             answer = await self.call_openai_style(client, "https://api.mistral.ai/v1/chat/completions", self.mistral_key, "mistral-large-latest", query)
-            return answer if answer else "Tutti i sistemi IA sono occupati. Riprova tra un attimo."
+            return answer if answer else "⚠️ Tutti i servizi IA sono momentaneamente offline."
 
-# 4. GESTORE MESSAGGI TELEGRAM
-ai = AIHandler()
+# 4. LOGICA DEL BOT TELEGRAM
+ai_engine = AIHandler()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    
-    # Messaggio di attesa
-    status_msg = await update.message.reply_text("...")
-    
-    # Otteniamo la risposta dall'IA
-    text_response = await ai.get_response(update.message.text)
-    
-    # Modifichiamo il messaggio con la risposta finale
-    await status_msg.edit_text(text_response)
-
-# 5. ESECUZIONE PRINCIPALE (Modificata per Python 3.14+)
-async def start_bot():
-    token = os.getenv("TELEGRAM_TOKEN")
-    if not token:
-        logger.error("TELEGRAM_TOKEN mancante!")
+    # Ignora messaggi vuoti o non testuali
+    if not update.message or not update.message.text:
         return
 
+    # Invia un messaggio di caricamento (molto utile per l'utente)
+    status_msg = await update.message.reply_text("...")
+    
+    # Ottieni la risposta dall'intelligenza artificiale
+    user_query = update.message.text
+    response = await ai_engine.get_response(user_query)
+    
+    # Modifica il messaggio precedente con la risposta finale
+    try:
+        await status_msg.edit_text(response)
+    except Exception as e:
+        logger.error(f"Errore modifica messaggio: {e}")
+        await update.message.reply_text(response)
+
+# 5. AVVIO DEL SISTEMA (Compatibile con Python 3.14+)
+async def main():
+    token = os.getenv("TELEGRAM_TOKEN")
+    if not token:
+        logger.error("ERRORE: TELEGRAM_TOKEN non trovato nelle variabili d'ambiente!")
+        return
+
+    # Configurazione dell'applicazione Telegram
     application = Application.builder().token(token).build()
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot in fase di polling...")
-    
-    # Avvio pulito dell'applicazione
+    logger.info("Bot in ascolto...")
+
+    # Gestione corretta del ciclo di vita per evitare il RuntimeError su Render
     async with application:
         await application.initialize()
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-        # Mantiene il bot in ascolto per sempre
+        # Questo mantiene il bot attivo all'infinito
         while True:
             await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    # Avvio Flask in un thread separato per il controllo di Render
+    # Avviamo il server Flask in un thread secondario per non bloccare Telegram
     threading.Thread(target=run_flask, daemon=True).start()
     
-    # Avvio del ciclo asincrono principale
+    # Avviamo il bot Telegram usando il nuovo standard asincrono
     try:
-        asyncio.run(start_bot())
+        asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot arrestato.")
+        logger.info("Bot spento correttamente.")
