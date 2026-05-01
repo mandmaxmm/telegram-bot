@@ -73,7 +73,7 @@ MISTRAL_API_KEY  = os.environ["MISTRAL_API_KEY"]
 XAI_API_KEY      = os.environ["XAI_API_KEY"]
 
 # — Porta per Render (default 10000) —
-PORT = int(os.environ.get("PORT", 10000))
+PORT = int(os.environ.get("PORT") or 10000)  # "or" gestisce anche stringa vuota
 
 # — Timeout HTTP per ogni chiamata Expert (secondi) —
 EXPERT_TIMEOUT = 45
