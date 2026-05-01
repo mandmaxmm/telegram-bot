@@ -44,6 +44,27 @@ logging.basicConfig(
 logger = logging.getLogger("EnsembleBot")
 
 # — Chiavi API (lette da variabili d'ambiente; non hardcodare mai) —
+# La validazione avviene subito: se manca una chiave il bot stampa
+# un messaggio esplicito e si ferma — molto più leggibile di KeyError.
+_REQUIRED_ENV_VARS = [
+    "TELEGRAM_TOKEN",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+]
+
+_missing = [k for k in _REQUIRED_ENV_VARS if not os.environ.get(k)]
+if _missing:
+    # Usa print perché il logger potrebbe non essere ancora pronto
+    print(
+        "\n❌ ERRORE DI CONFIGURAZIONE — Variabili d'ambiente mancanti su Render:\n"
+        + "\n".join(f"   • {k}" for k in _missing)
+        + "\n\nVai su Render → Environment e aggiungi le chiavi mancanti.\n"
+    )
+    raise SystemExit(1)
+
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 GOOGLE_API_KEY   = os.environ["GOOGLE_API_KEY"]
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
@@ -249,10 +270,14 @@ def _build_synthesis_prompt(user_query: str, opinions: dict[str, str]) -> str:
 
 
 async def _synthesize_with_gemini(synthesis_prompt: str) -> Optional[str]:
-    """Modello Maestro: Gemini 1.5 Flash via Google Generative Language API."""
+    """Modello Maestro: Gemini 2.0 Flash via Google Generative Language API.
+
+    Endpoint: v1 (stabile) — il vecchio v1beta non espone più gemini-1.5-flash.
+    Modello:  gemini-2.0-flash — successore di 1.5-flash, disponibile su v1.
+    """
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
+        "https://generativelanguage.googleapis.com/v1/models/"
+        f"gemini-2.0-flash:generateContent?key={GOOGLE_API_KEY}"
     )
     payload = {
         "system_instruction": {"parts": [{"text": SYNTHESIS_SYSTEM_PROMPT}]},
