@@ -4,12 +4,12 @@ import logging
 import threading
 import signal
 import time
-from typing import Optional, Callable, Awaitable, Dict, Tuple
+from typing import Optional, Dict, Tuple
 
 import httpx
 from flask import Flask, request, jsonify
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -20,7 +20,14 @@ logger = logging.getLogger("EnsembleV5")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-PORT = int(os.environ.get("PORT", 10000))
+def _get_port():
+    val = os.environ.get("PORT")
+    try:
+        return int(val) if val else 10000
+    except ValueError:
+        return 10000
+
+PORT = _get_port()
 
 # API KEYS
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -36,9 +43,9 @@ HTTP_CLIENT = httpx.AsyncClient(
 
 # CACHE (TTL)
 CACHE: Dict[str, Tuple[float, str]] = {}
-CACHE_TTL = 300  # 5 minuti
+CACHE_TTL = 300
 
-# RANKING BASE (dinamico)
+# RANKING BASE
 MODEL_SCORES = {
     "groq": 1.0,
     "deepseek": 1.2,
@@ -46,12 +53,13 @@ MODEL_SCORES = {
 }
 
 # ─────────────────────────────────────────────
-# FLASK SERVER
+# FLASK SERVER (Render Fix)
 # ─────────────────────────────────────────────
 
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
+@flask_app.route("/health")
 def home():
     return {"status": "ok"}, 200
 
@@ -69,10 +77,13 @@ def api_ask():
     try:
         result = loop.run_until_complete(run_ensemble_engine(query))
         return jsonify({"response": result})
-    except Exception:
+    except Exception as e:
+        logger.exception("API error")
         return jsonify({"error": "internal"}), 500
 
 def run_flask():
+    import logging as _l
+    _l.getLogger("werkzeug").setLevel(_l.ERROR)
     flask_app.run(host="0.0.0.0", port=PORT)
 
 # ─────────────────────────────────────────────
@@ -102,8 +113,9 @@ async def call_groq(prompt: str):
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
             json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]},
         )
+        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
-    except:
+    except Exception:
         return None
 
 async def call_deepseek(prompt: str):
@@ -115,8 +127,9 @@ async def call_deepseek(prompt: str):
             headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
             json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]},
         )
+        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
-    except:
+    except Exception:
         return None
 
 async def call_mistral(prompt: str):
@@ -128,27 +141,24 @@ async def call_mistral(prompt: str):
             headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"},
             json={"model": "mistral-large-latest", "messages": [{"role": "user", "content": prompt}]},
         )
+        r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
-    except:
+    except Exception:
         return None
 
 # ─────────────────────────────────────────────
-# EXPERT GATHER + RANKING
+# RANKING
 # ─────────────────────────────────────────────
 
 def score_response(text: str, model: str) -> float:
-    length_score = min(len(text) / 500, 1)
-    base = MODEL_SCORES.get(model, 1)
-    return length_score * base
+    return min(len(text) / 500, 1) * MODEL_SCORES.get(model, 1)
 
 async def gather_experts(prompt: str):
-    tasks = [
+    results = await asyncio.gather(
         call_groq(prompt),
         call_deepseek(prompt),
         call_mistral(prompt),
-    ]
-
-    results = await asyncio.gather(*tasks)
+    )
 
     labeled = {
         "groq": results[0],
@@ -167,7 +177,7 @@ async def gather_experts(prompt: str):
     return ranked
 
 # ─────────────────────────────────────────────
-# MASTER (SEMPLIFICATO + ROBUSTO)
+# MASTER (Gemini + fallback)
 # ─────────────────────────────────────────────
 
 async def synthesize(prompt: str, ranked):
@@ -177,11 +187,11 @@ async def synthesize(prompt: str, ranked):
                 f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}",
                 json={"contents": [{"parts": [{"text": prompt}]}]},
             )
+            r.raise_for_status()
             return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except:
+        except Exception:
             pass
 
-    # fallback → miglior expert
     return ranked[0][1]
 
 # ─────────────────────────────────────────────
@@ -220,7 +230,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         res = await run_ensemble_engine(update.message.text)
     except Exception:
-        res = "Errore interno"
+        res = "❌ Errore interno"
 
     await msg.delete()
     await update.message.reply_text(res)
@@ -238,10 +248,15 @@ def setup_shutdown(app):
     signal.signal(signal.SIGINT, lambda s, f: asyncio.create_task(shutdown()))
 
 # ─────────────────────────────────────────────
-# MAIN
+# MAIN (FIX Python 3.14)
 # ─────────────────────────────────────────────
 
 def main():
+    # ✅ FIX EVENT LOOP
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Flask thread (Render)
     threading.Thread(target=run_flask, daemon=True).start()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -250,7 +265,12 @@ def main():
 
     setup_shutdown(app)
 
-    app.run_polling(drop_pending_updates=True)
+    logger.info("🚀 Bot avviato")
+
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 if __name__ == "__main__":
     main()
