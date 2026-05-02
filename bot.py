@@ -1,87 +1,57 @@
 # =========================================================
-# 🚀 ENSEMBLE ENGINE V6
-# Fix:
-# - Telegram 409 Conflict definitivo
-# - Python 3.14 asyncio fix
-# - Gemini endpoint fix
-# - Fault tolerance migliorata
+# 🚀 ENSEMBLE ENGINE V6.2
+# - Gestione reale modelli attivi
+# - Debug completo
+# - Maestro dinamico
 # =========================================================
 
 import os
 import asyncio
 import logging
 import threading
-import signal
 import time
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import httpx
-from flask import Flask, request, jsonify
+from flask import Flask
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-# ───────────────── CONFIG ─────────────────
+# ───────── CONFIG ─────────
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("EnsembleV6")
+logger = logging.getLogger("V6.2")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-def get_port():
-    try:
-        return int(os.environ.get("PORT") or 10000)
-    except:
-        return 10000
-
-PORT = get_port()
-
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
-# HTTP CLIENT
+PORT = int(os.environ.get("PORT") or 10000)
+
 HTTP_CLIENT = httpx.AsyncClient(timeout=60)
 
 # CACHE
 CACHE: Dict[str, Tuple[float, str]] = {}
 CACHE_TTL = 300
 
-# ───────────────── FLASK ─────────────────
+# DEBUG
+LAST_DEBUG: Dict[str, any] = {}
+
+# ───────── FLASK ─────────
 
 app_flask = Flask(__name__)
 
 @app_flask.route("/")
-def health():
+def home():
     return {"status": "ok"}, 200
-
-@app_flask.route("/api/ask", methods=["POST"])
-def api():
-    data = request.json
-    query = data.get("query")
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    result = loop.run_until_complete(run_engine(query))
-    return jsonify({"response": result})
 
 def run_flask():
     app_flask.run(host="0.0.0.0", port=PORT)
 
-# ───────────────── CACHE ─────────────────
-
-def get_cache(q):
-    if q in CACHE:
-        ts, val = CACHE[q]
-        if time.time() - ts < CACHE_TTL:
-            return val
-    return None
-
-def set_cache(q, val):
-    CACHE[q] = (time.time(), val)
-
-# ───────────────── MODELS ─────────────────
+# ───────── MODELS ─────────
 
 async def call_groq(prompt):
     if not GROQ_API_KEY:
@@ -109,50 +79,84 @@ async def call_mistral(prompt):
     except:
         return None
 
-# ───────────────── MASTER ─────────────────
-
 async def call_gemini(prompt):
     if not GOOGLE_API_KEY:
         return None
     try:
-        r = await HTTP_CLIENT.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
+        r = await HTTP_CLIENT.post(url, json={
+            "contents": [{"parts": [{"text": prompt}]}]
+        })
         return r.json()["candidates"][0]["content"]["parts"][0]["text"]
     except:
         return None
 
-# ───────────────── ENGINE ─────────────────
+# ───────── ENGINE ─────────
 
-async def run_engine(query):
+async def run_engine(query: str):
 
-    cached = get_cache(query)
-    if cached:
-        return cached
+    responses: List[Tuple[str, str]] = []
 
     tasks = await asyncio.gather(
         call_groq(query),
         call_mistral(query),
     )
 
-    responses = [r for r in tasks if r]
+    if tasks[0]:
+        responses.append(("Groq", tasks[0]))
+    if tasks[1]:
+        responses.append(("Mistral", tasks[1]))
 
     if not responses:
-        return "⚠️ Nessuna risposta"
+        return "⚠️ Nessuna risposta disponibile"
 
-    combined = "\n\n".join(responses)
+    combined = "\n\n".join([r[1] for r in responses])
 
-    final = await call_gemini(query + "\n\n" + combined)
+    gemini_response = await call_gemini(query + "\n\n" + combined)
 
-    if not final:
-        final = responses[0]
+    # DEBUG INFO
+    global LAST_DEBUG
+    LAST_DEBUG = {
+        "models_used": [r[0] for r in responses],
+        "gemini_used": bool(gemini_response)
+    }
 
-    set_cache(query, final)
+    if gemini_response:
+        return gemini_response
 
-    return final
+    # fallback intelligente → risposta più lunga
+    best = max(responses, key=lambda x: len(x[1]))
+    return best[1]
 
-# ───────────────── TELEGRAM ─────────────────
+# ───────── COMMANDS ─────────
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    active = sum(bool(x) for x in [GROQ_API_KEY, MISTRAL_API_KEY])
+    msg = f"""
+📊 STATUS
+
+Groq: {"✅" if GROQ_API_KEY else "❌"}
+Mistral: {"✅" if MISTRAL_API_KEY else "❌"}
+Gemini: {"✅" if GOOGLE_API_KEY else "❌ (disattivato)"}
+DeepSeek: {"⚠️" if DEEPSEEK_API_KEY else "❌"}
+
+Modelli attivi: {active}
+Maestro: {"Gemini" if GOOGLE_API_KEY else "Fallback Expert"}
+"""
+    await update.message.reply_text(msg)
+
+async def models(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Pool attivo:\n- Groq\n- Mistral\n\nMaster: Gemini (se attivo)"
+    )
+
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(str(LAST_DEBUG))
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏓 Pong")
+
+# ───────── TELEGRAM ─────────
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⚙️ Elaborazione...")
@@ -160,7 +164,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
     await update.message.reply_text(res)
 
-# ───────────────── MAIN ─────────────────
+# ───────── MAIN ─────────
 
 def main():
     loop = asyncio.new_event_loop()
@@ -170,6 +174,10 @@ def main():
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("models", models))
+    app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CommandHandler("ping", ping))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
     async def startup():
@@ -177,7 +185,7 @@ def main():
 
     loop.run_until_complete(startup())
 
-    logger.info("🚀 V6 RUNNING")
+    logger.info("🚀 V6.2 RUNNING")
 
     app.run_polling(drop_pending_updates=True)
 
